@@ -1,0 +1,3 @@
+[submodule "passage_ranking/MSMARCO-Passage-Ranking"]
+	path = passage_ranking/MSMARCO-Passage-Ranking
+	url = https://github.com/microsoft/MSMARCO-Passage-Ranking
