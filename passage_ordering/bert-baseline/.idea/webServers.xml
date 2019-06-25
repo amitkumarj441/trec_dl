@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="WebServers">
+    <option name="servers">
+      <webServer id="c2583d70-6aa3-46c5-a5c2-ad300fa7f84c" name="remote" url="http://192.168.193.20">
+        <fileTransfer host="192.168.193.20" port="22" rootFolder="/data/hwm/dl4marco-bert" accessType="SFTP">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" />
+          </advancedOptions>
+          <option name="port" value="22" />
+        </fileTransfer>
+      </webServer>
+    </option>
+  </component>
+</project>
