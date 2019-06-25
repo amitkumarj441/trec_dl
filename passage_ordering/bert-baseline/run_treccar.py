@@ -122,19 +122,53 @@ flags.DEFINE_integer(
 METRICS_MAP = ['MAP', 'RPrec', 'MRR', 'NDCG', 'MRR@10']
 FAKE_DOC_ID = "00000000"  # Fake doc id used to fill queries with less than num_eval_docs.
 
+def hinge_loss(similarity_good_tensor, similarity_bad_tensor, margin):
+  return tf.maximum(
+      0.0,
+      tf.add(
+          tf.sub(
+              margin,
+              similarity_good_tensor
+          ),
+          similarity_bad_tensor
+      )
+  )
+
+def cosine_similarity(a, b):
+  return tf.div(
+      tf.reduce_sum(tf.mul(a, b), 1),
+      tf.mul(
+          tf.sqrt(tf.reduce_sum(tf.square(a), 1)),
+          tf.sqrt(tf.reduce_sum(tf.square(b), 1))
+      )
+  )
+
+def getBERTOutput(self,bert_config,is_training,input_ids,
+              input_mask,segment_ids,use_one_hot_embeddings):
+        # with tf.variable_scope(name_or_scope='encoder', reuse=tf.AUTO_REUSE):
+      model = modeling.BertModel(
+          config=bert_config,
+          is_training=is_training,
+          input_ids=input_ids,
+          input_mask=input_mask,
+          token_type_ids=segment_ids,
+          use_one_hot_embeddings=use_one_hot_embeddings)
+      return model.get_pooled_output()
 
 def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
                  labels, num_labels, use_one_hot_embeddings):
   """Creates a classification model."""
-  model = modeling.BertModel(
-      config=bert_config,
-      is_training=is_training,
-      input_ids=input_ids,
-      input_mask=input_mask,
-      token_type_ids=segment_ids,
-      use_one_hot_embeddings=use_one_hot_embeddings)
+  # model = modeling.BertModel(
+  #     config=bert_config,
+  #     is_training=is_training,
+  #     input_ids=input_ids,
+  #     input_mask=input_mask,
+  #     token_type_ids=segment_ids,
+  #     use_one_hot_embeddings=use_one_hot_embeddings)
 
-  output_layer = model.get_pooled_output()
+  # output_layer = model.get_pooled_output()
+  output_layer = getBERTOutput(bert_config,is_training,input_ids,
+              input_mask,segment_ids,use_one_hot_embeddings)
   hidden_size = output_layer.shape[-1].value
 
   output_weights = tf.get_variable(
