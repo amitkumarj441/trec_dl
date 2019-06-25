@@ -14,8 +14,8 @@ import re
 import tensorflow as tf
 import time
 # local modules
-import tokenization
-import trec_car_classes
+from passage_ordering.bert_baseline import tokenization
+from passage_ordering.bert_baseline import trec_car_classes
 
 
 flags = tf.flags

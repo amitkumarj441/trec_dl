@@ -21,7 +21,7 @@ import json
 import random
 import re
 
-import modeling
+from passage_ordering.bert_baseline import modeling
 import six
 import tensorflow as tf
 

@@ -16,7 +16,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import optimization
+from passage_ordering.bert_baseline import optimization
 import tensorflow as tf
 
 
