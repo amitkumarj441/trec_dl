@@ -22,6 +22,7 @@ import collections
 import unicodedata
 import six
 import tensorflow as tf
+from numpy import unicode
 
 
 def convert_to_bert_input(text, max_seq_length, tokenizer, add_cls):
