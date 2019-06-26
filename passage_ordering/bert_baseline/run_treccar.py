@@ -134,21 +134,48 @@ def hinge_loss(similarity_good_tensor, similarity_bad_tensor, margin):
 
 
 def cosine_similarity(a, b):
-    return tf.div(
-        tf.reduce_sum(tf.mul(a, b), 1),
-        tf.mul(
+    return tf.math.divide(
+        tf.reduce_sum(tf.multiply(a, b), 1),
+        tf.multiply(
             tf.sqrt(tf.reduce_sum(tf.square(a), 1)),
             tf.sqrt(tf.reduce_sum(tf.square(b), 1))
         )
     )
 
-def get_bert_output(bert_config, is_training, features, use_one_hot_embeddings):
+
+def gesd_similarity(a, b):
+    a = tf.nn.l2_normalize(a, dim=1)
+    b = tf.nn.l2_normalize(b, dim=1)
+    euclidean = tf.sqrt(tf.reduce_sum((a - b) ** 2, 1))
+    mm = tf.reshape(
+        tf.matmul(
+            tf.reshape(a, [-1, 1, tf.shape(a)[1]]),
+            tf.transpose(
+                tf.reshape(b, [-1, 1, tf.shape(a)[1]]),
+                [0, 2, 1]
+            )
+        ),
+        [-1]
+    )
+    sigmoid_dot = tf.exp(-1 * (mm + 1))
+    return 1.0 / (1.0 + euclidean) * 1.0 / (1.0 + sigmoid_dot)
+
+
+def get_most_similar_answer(ga, bas):
+    # ga = tf.cast(ga, tf.float32)
+    # bas = tf.cast(bas, tf.float32)
+    gas = tf.tile(tf.reshape(ga, (1, ga.shape[-1])), [bas.shape[0], 1])
+    most_similar_index = tf.argmax(gesd_similarity(gas, bas))
+    return bas[most_similar_index, :]
+
+
+def get_bert_output(bert_config, is_training, features, input_ids, use_one_hot_embeddings):
     query_doc_ids_list = features["query_doc_ids_list"]
     query_qrel_ids = features["query_qrel_ids"]
     segment_ids = features["segment_ids"]
     input_mask = features["input_mask"]
     len_gt_titles = features["len_gt_titles"]
-    input_ids = features["input_ids"]
+
     model = modeling.BertModel(
         config=bert_config,
         is_training=is_training,
@@ -159,7 +186,6 @@ def get_bert_output(bert_config, is_training, features, use_one_hot_embeddings):
     return model.get_pooled_output()
 
 
-
 def create_model(bert_config, is_training, features, use_one_hot_embeddings):
     query_doc_ids_list = features["query_doc_ids_list"]
     query_qrel_ids = features["query_qrel_ids"]
@@ -168,7 +194,15 @@ def create_model(bert_config, is_training, features, use_one_hot_embeddings):
     len_gt_titles = features["len_gt_titles"]
     input_ids = features["input_ids"]
 
-    docs_bert_output = []
+    good_answers_bert_outputs = get_bert_output(bert_config, is_training,
+                                              features, query_qrel_ids, use_one_hot_embeddings)
+    for i in range(query_doc_ids_list.shape[0].val):
+        bad_answers_bert_outputs = \
+            get_bert_output(bert_config, is_training, features, query_doc_ids_list[i], use_one_hot_embeddings)
+
+        most_similar_answer = get_most_similar_answer(good_answers_bert_outputs[i], bad_answers_bert_outputs)
+
+
 
     """Creates a classification model."""
     for input_index in range(query_doc_ids_list.shape[0].val):
@@ -225,6 +259,7 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
         # len_gt_titles = features["len_gt_titles"]
 
         is_training = (mode == tf.estimator.ModeKeys.TRAIN)
+
         (total_loss, per_example_loss, log_probs) = create_model(
             bert_config, is_training, features, use_one_hot_embeddings)
 
