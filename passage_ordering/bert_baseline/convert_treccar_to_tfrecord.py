@@ -85,7 +85,7 @@ flags.DEFINE_integer(
     "than this will be padded.")
 
 flags.DEFINE_integer(
-    "num_candidate_docs", 700,
+    "num_candidate_docs", 8,
     "The number of candidate (negative) documents.")
 
 
@@ -103,7 +103,7 @@ def get_query_ids(query, tokenizer):
 
 
 def convert_dataset(data, corpus, set_name, tokenizer):
-    output_path = FLAGS.output_folder + '/dataset1_' + set_name + '.tf'
+    output_path = FLAGS.output_folder + '/dataset8_' + set_name + '.tf'
 
     print('Converting {} to tfrecord'.format(set_name))
     start_time = time.time()
@@ -147,10 +147,13 @@ def convert_dataset(data, corpus, set_name, tokenizer):
 
             # generate all candidate docs ids into "one" list
             candidate_token_ids = []
+            num_candidate_docs = 0
             for candidate_title in doc_titles:
                 # skip the positive docs
                 if candidate_title in query_ids_set:
                     continue
+                else:
+                    padded_title = candidate_title
                 candidate_token_ids.extend(
                     tokenization.convert_to_bert_input(
                         text=tokenization.convert_to_unicode(corpus[candidate_title]),
@@ -158,9 +161,20 @@ def convert_dataset(data, corpus, set_name, tokenizer):
                         tokenizer=tokenizer,
                         add_cls=False)
                 )
+                num_candidate_docs += 1
 
-                if len(candidate_token_ids) == FLAGS.num_candidate_docs:
+                if num_candidate_docs == FLAGS.num_candidate_docs:
                     break
+
+            while num_candidate_docs < FLAGS.num_candidate_docs:
+                candidate_token_ids.extend(
+                    tokenization.convert_to_bert_input(
+                        text=tokenization.convert_to_unicode(corpus[padded_title]),
+                        max_seq_length=docs_length,
+                        tokenizer=tokenizer,
+                        add_cls=False)
+                )
+
 
             # generate all qrels docs ids
             qrels_token_ids = [
