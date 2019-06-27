@@ -34,6 +34,10 @@ flags.DEFINE_string(
     "Path to the cbor file containing the Wikipedia paragraphs.")
 
 flags.DEFINE_string(
+    "corpus_json", r"E:\PythonProject\trec_dl\passage_ordering\bert_baseline\corpus1.json",
+    "Path to the json file containing the 469K Wikipedia paragraphs.")
+
+flags.DEFINE_string(
     "qrels_train", "../data/tf_data/train.qrels",
     "Path to the topic / relevant doc ids pairs for training.")
 
@@ -58,12 +62,6 @@ flags.DEFINE_string(
     "Path to the topic / candidate doc ids pairs for test.")
 
 flags.DEFINE_integer(
-    "max_seq_length", 512,
-    "The maximum total input sequence length after WordPiece tokenization. "
-    "Sequences longer than this will be truncated, and sequences shorter "
-    "than this will be padded.")
-
-flags.DEFINE_integer(
     "max_query_length", 64,
     "The maximum query sequence length after WordPiece tokenization. "
     "Sequences longer than this will be truncated.")
@@ -80,6 +78,17 @@ flags.DEFINE_integer(
     "num_test_docs", 1000,
     "The number of docs per query for the test set.")
 
+flags.DEFINE_integer(
+    "max_seq_length", 512,
+    "The maximum total input sequence length after WordPiece tokenization. "
+    "Sequences longer than this will be truncated, and sequences shorter "
+    "than this will be padded.")
+
+flags.DEFINE_integer(
+    "num_candidate_docs", 700,
+    "The number of candidate (negative) documents.")
+
+
 def get_query_ids(query, tokenizer):
     query = query.replace('enwiki:', '')
     query = query.replace('%20', ' ')
@@ -94,16 +103,23 @@ def get_query_ids(query, tokenizer):
 
 
 def convert_dataset(data, corpus, set_name, tokenizer):
-    output_path = FLAGS.output_folder + '/dataset_' + set_name + '.tf'
+    output_path = FLAGS.output_folder + '/dataset1_' + set_name + '.tf'
 
     print('Converting {} to tfrecord'.format(set_name))
     start_time = time.time()
 
     random_title = list(corpus.keys())[0]
 
+    all_doc_ids = set(corpus.keys())
+
     with tf.python_io.TFRecordWriter(output_path) as writer:
         for i, query in enumerate(data):
             qrels, doc_titles = data[query]
+            # if len(set(qrels) - set(all_doc_ids)) != 0:
+            #     continue
+            #
+            # if len(set(doc_titles) - set(all_doc_ids)) != 0:
+            #     continue
 
             if i % 1000 == 0:
                 print('query', query)
@@ -126,18 +142,25 @@ def convert_dataset(data, corpus, set_name, tokenizer):
             # Add fake docs so we always have max_docs per query.
             doc_titles += max(0, max_docs - len(doc_titles)) * [random_title]
 
-            candidate_titles = set(doc_titles) - set(qrels)
-
             docs_length = FLAGS.max_seq_length - len(query_ids)
+            query_ids_set = set(query_ids)
 
-            # generate all candidate docs ids into one list
+            # generate all candidate docs ids into "one" list
             candidate_token_ids = []
-            for cadidate_title in candidate_titles:
-                candidate_token_ids.extend(tokenization.convert_to_bert_input(
-                    text=tokenization.convert_to_unicode(corpus[cadidate_title]),
-                    max_seq_length=docs_length,
-                    tokenizer=tokenizer,
-                    add_cls=False))
+            for candidate_title in doc_titles:
+                # skip the positive docs
+                if candidate_title in query_ids_set:
+                    continue
+                candidate_token_ids.extend(
+                    tokenization.convert_to_bert_input(
+                        text=tokenization.convert_to_unicode(corpus[candidate_title]),
+                        max_seq_length=docs_length,
+                        tokenizer=tokenizer,
+                        add_cls=False)
+                )
+
+                if len(candidate_token_ids) == FLAGS.num_candidate_docs:
+                    break
 
             # generate all qrels docs ids
             qrels_token_ids = [
@@ -180,12 +203,14 @@ def convert_dataset(data, corpus, set_name, tokenizer):
                 print('estimated total hours to save: {}'.format(est_hours))
 
 
-def load_qrels(path):
+def load_qrels(path, limited_topics=None):
     """Loads qrels into a dict of key: topic, value: list of relevant doc ids."""
     qrels = collections.defaultdict(set)
     with open(path) as f:
         for i, line in enumerate(f):
             topic, _, doc_title, relevance = line.rstrip().split(' ')
+            if limited_topics and topic not in limited_topics:
+                continue
             if int(relevance) >= 1:
                 qrels[topic].add(doc_title)
             if i % 1000 == 0:
@@ -193,7 +218,7 @@ def load_qrels(path):
     return qrels
 
 
-def load_run(path):
+def load_run(path, limited_topics=None):
     """Loads run into a dict of key: topic, value: list of candidate doc ids."""
 
     # We want to preserve the order of runs so we can pair the run file with the
@@ -202,11 +227,13 @@ def load_run(path):
     with open(path) as f:
         for i, line in enumerate(f):
             topic, _, doc_title, rank, _, _ = line.split(' ')
+            if limited_topics and topic not in limited_topics:
+                continue
             if topic not in run:
                 run[topic] = []
             run[topic].append((doc_title, int(rank)))
             if i % 100000 == 0:
-                break
+                # break
                 print('Loading run {}'.format(i))
     # Sort candidate docs by rank.
     sorted_run = collections.OrderedDict()
@@ -216,6 +243,12 @@ def load_run(path):
         sorted_run[topic] = doc_titles
 
     return sorted_run
+
+
+def load_corpus_json(path):
+    with open(path, 'r', encoding='utf-8') as f:
+        cj = json.load(f)
+    return cj
 
 
 def load_corpus(path):
@@ -252,6 +285,10 @@ def merge(qrels, run):
 
 
 def main():
+    with open("topics.txt", "r") as f:
+        topics = f.readlines()
+    limited_topics = set([topic.strip() for topic in topics])
+
     print('Loading Tokenizer...')
     tokenizer = tokenization.FullTokenizer(
         vocab_file=FLAGS.vocab_file, do_lower_case=True)
@@ -260,7 +297,8 @@ def main():
         os.mkdir(FLAGS.output_folder)
 
     print('Loading Corpus...')
-    corpus = load_corpus(FLAGS.corpus)
+    # corpus = load_corpus(FLAGS.corpus)
+    corpus = load_corpus_json(FLAGS.corpus_json)
 
     # for set_name, qrels_path, run_path in [
     #     ('train', FLAGS.qrels_train, FLAGS.run_train),
@@ -270,8 +308,8 @@ def main():
         ('test', FLAGS.qrels_test, FLAGS.run_test)]:
         print('Converting {}'.format(set_name))
 
-        qrels = load_qrels(path=qrels_path)
-        run = load_run(path=run_path)
+        qrels = load_qrels(path=qrels_path, limited_topics=limited_topics)
+        run = load_run(path=run_path, limited_topics=limited_topics)
         data = merge(qrels=qrels, run=run)
 
         convert_dataset(data=data,
