@@ -10,6 +10,9 @@ import time
 import numpy as np
 import tensorflow as tf
 
+import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
+
 # local modules
 from passage_ordering.bert_baseline import metrics
 from passage_ordering.bert_baseline import modeling
@@ -22,13 +25,13 @@ FLAGS = flags.FLAGS
 ## Required parameters
 flags.DEFINE_string(
     "data_dir",
-    "./data/tfrecord/",
+    r"../data/tf_data/",
     "The input data dir. Should contain the .tfrecord files and the supporting "
     "query-docids mapping files.")
 
 flags.DEFINE_string(
     "bert_config_file",
-    "./data/bert/pretrained_models/uncased_L-24_H-1024_A-16/bert_config.json",
+    "E:/SZTY/TREC-CAR/uncased_L-24_H-1024_A-16/bert_config.json",
     "The config json file corresponding to the pre-trained BERT model. "
     "This specifies the model architecture.")
 
@@ -42,7 +45,8 @@ flags.DEFINE_boolean(
 
 flags.DEFINE_string(
     "init_checkpoint",
-    "/path_to_bert_pretrained_on_treccar/model.ckpt-1000000",
+    # "/path_to_bert_pretrained_on_treccar/model.ckpt-1000000",
+    "",
     "Initial checkpoint (usually from a pre-trained BERT model).")
 
 flags.DEFINE_integer(
@@ -55,7 +59,7 @@ flags.DEFINE_bool("do_train", True, "Whether to run training.")
 
 flags.DEFINE_bool("do_eval", True, "Whether to run eval on the dev set.")
 
-flags.DEFINE_integer("train_batch_size", 32, "Total batch size for training.")
+flags.DEFINE_integer("train_batch_size", 8, "Total batch size for training.")
 
 flags.DEFINE_integer("eval_batch_size", 32, "Total batch size for eval.")
 
@@ -124,7 +128,7 @@ def hinge_loss(similarity_good_tensor, similarity_bad_tensor, margin):
     return tf.maximum(
         0.0,
         tf.add(
-            tf.sub(
+            tf.subtract(
                 margin,
                 similarity_good_tensor
             ),
@@ -144,8 +148,8 @@ def cosine_similarity(a, b):
 
 
 def gesd_similarity(a, b):
-    a = tf.nn.l2_normalize(a, dim=1)
-    b = tf.nn.l2_normalize(b, dim=1)
+    a = tf.nn.l2_normalize(a, axis=1)
+    b = tf.nn.l2_normalize(b, axis=1)
     euclidean = tf.sqrt(tf.reduce_sum((a - b) ** 2, 1))
     mm = tf.reshape(
         tf.matmul(
@@ -170,68 +174,44 @@ def get_most_similar_answer(ga, bas):
 
 
 def get_bert_output(bert_config, is_training, features, input_ids, use_one_hot_embeddings):
-    query_doc_ids_list = features["query_doc_ids_list"]
-    query_qrel_ids = features["query_qrel_ids"]
     segment_ids = features["segment_ids"]
     input_mask = features["input_mask"]
-    len_gt_titles = features["len_gt_titles"]
-
-    model = modeling.BertModel(
-        config=bert_config,
-        is_training=is_training,
-        input_ids=input_ids,
-        input_mask=input_mask,
-        token_type_ids=segment_ids,
-        use_one_hot_embeddings=use_one_hot_embeddings)
-    return model.get_pooled_output()
+    with tf.variable_scope("bert_out", reuse=tf.AUTO_REUSE):
+        model = modeling.BertModel(
+            config=bert_config,
+            is_training=is_training,
+            input_ids=input_ids,
+            input_mask=input_mask,
+            token_type_ids=segment_ids,
+            use_one_hot_embeddings=use_one_hot_embeddings)
+        return model.get_pooled_output()
 
 
 def create_model(bert_config, is_training, features, use_one_hot_embeddings):
     query_doc_ids_list = features["query_doc_ids_list"]
     query_qrel_ids = features["query_qrel_ids"]
-    segment_ids = features["segment_ids"]
-    input_mask = features["input_mask"]
-    len_gt_titles = features["len_gt_titles"]
-    input_ids = features["input_ids"]
 
     good_answers_bert_outputs = get_bert_output(bert_config, is_training,
-                                              features, query_qrel_ids, use_one_hot_embeddings)
-    for i in range(query_doc_ids_list.shape[0].val):
+                                                features, query_qrel_ids, use_one_hot_embeddings)
+    most_similar_answers = []
+    for i in range(query_doc_ids_list.shape[0]):
         bad_answers_bert_outputs = \
             get_bert_output(bert_config, is_training, features, query_doc_ids_list[i], use_one_hot_embeddings)
 
         most_similar_answer = get_most_similar_answer(good_answers_bert_outputs[i], bad_answers_bert_outputs)
+        # print(most_similar_answer)
+        most_similar_answers.append(tf.reshape(most_similar_answer, [1, -1]))
 
 
+    most_similar_answers = tf.concat(most_similar_answers, axis=0)
+    print(most_similar_answers)
 
-    """Creates a classification model."""
-    for input_index in range(query_doc_ids_list.shape[0].val):
-        output_layer = get_bert_output()
-
-    hidden_size = output_layer.shape[-1].value
-
-    # output_weights = tf.get_variable(
-    #     "output_weights", [num_labels, hidden_size],
-    #     initializer=tf.truncated_normal_initializer(stddev=0.02))
-    #
-    # output_bias = tf.get_variable(
-    #     "output_bias", [num_labels], initializer=tf.zeros_initializer())
 
     with tf.variable_scope("loss"):
-        if is_training:
-            # I.e., 0.1 dropout
-            output_layer = tf.nn.dropout(output_layer, keep_prob=0.9)
-
-        logits = tf.matmul(output_layer, output_weights, transpose_b=True)
-        logits = tf.nn.bias_add(logits, output_bias)
-        log_probs = tf.nn.log_softmax(logits, axis=-1)
-
-        one_hot_labels = tf.one_hot(labels, depth=num_labels, dtype=tf.float32)
-
-        per_example_loss = -tf.reduce_sum(one_hot_labels * log_probs, axis=-1)
+        per_example_loss = hinge_loss(good_answers_bert_outputs, most_similar_answers, 0.8)
         loss = tf.reduce_mean(per_example_loss)
-
-        return (loss, per_example_loss, log_probs)
+        tf.summary.scalar('Loss', loss)
+        return (loss, per_example_loss)
 
 
 def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
@@ -246,21 +226,11 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
         for name in sorted(features.keys()):
             tf.logging.info("  name = %s, shape = %s" % (name, features[name].shape))
 
-        query_doc_ids_list = features["query_doc_ids_list"]
-        query_qrel_ids = features["query_qrel_ids"]
-        segment_ids = features["segment_ids"]
-        input_mask = features["input_mask"]
         len_gt_titles = features["len_gt_titles"]
-
-        # input_ids = features["input_ids"]
-        # input_mask = features["input_mask"]
-        # segment_ids = features["segment_ids"]
-        # label_ids = features["label_ids"]
-        # len_gt_titles = features["len_gt_titles"]
 
         is_training = (mode == tf.estimator.ModeKeys.TRAIN)
 
-        (total_loss, per_example_loss, log_probs) = create_model(
+        (total_loss, per_example_loss) = create_model(
             bert_config, is_training, features, use_one_hot_embeddings)
 
         tvars = tf.trainable_variables()
@@ -290,8 +260,11 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
         output_spec = None
         if mode == tf.estimator.ModeKeys.TRAIN:
 
-            train_op = optimization.create_optimizer(
-                total_loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu)
+            # train_op = optimization.create_optimizer(
+            #     total_loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu)
+
+            optimizer = tf.train.GradientDescentOptimizer(learning_rate)
+            train_op = optimizer.minimize(total_loss, global_step=tf.train.get_global_step())
 
             output_spec = tf.contrib.tpu.TPUEstimatorSpec(
                 mode=mode,
@@ -299,15 +272,15 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
                 train_op=train_op,
                 scaffold_fn=scaffold_fn)
 
-        elif mode == tf.estimator.ModeKeys.PREDICT:
-            output_spec = tf.contrib.tpu.TPUEstimatorSpec(
-                mode=mode,
-                predictions={
-                    "log_probs": log_probs,
-                    "label_ids": label_ids,
-                    "len_gt_titles": len_gt_titles,
-                },
-                scaffold_fn=scaffold_fn)
+        # elif mode == tf.estimator.ModeKeys.PREDICT:
+        #     output_spec = tf.contrib.tpu.TPUEstimatorSpec(
+        #         mode=mode,
+        #         predictions={
+        #             "log_probs": log_probs,
+        #             "label_ids": label_ids,
+        #             "len_gt_titles": len_gt_titles,
+        #         },
+        #         scaffold_fn=scaffold_fn)
 
         else:
             raise ValueError(
@@ -336,7 +309,6 @@ def input_fn_builder(dataset_path, seq_length, num_candidate, is_training,
                     [], tf.int64, allow_missing=True),
                 "qrel_ids": tf.FixedLenSequenceFeature(
                     [], tf.int64, allow_missing=True),
-                "label": tf.FixedLenFeature([], tf.int64),
                 "len_gt_titles": tf.FixedLenFeature([], tf.int64),
                 "len_docs": tf.FixedLenFeature([], tf.int64),
             }
@@ -346,14 +318,20 @@ def input_fn_builder(dataset_path, seq_length, num_candidate, is_training,
             len_docs = tf.cast(sample["len_docs"], tf.int32)
             query_ids = tf.cast(sample["query_ids"], tf.int32)
 
-            doc_ids_list = tf.cast(sample["doc_ids"], tf.int32)
-            doc_ids_list = tf.reshape(doc_ids_list, (-1, len_docs))
 
-            copy_query_ids = tf.reshape(query_ids, [1, query_ids.shape[0]])
-            copy_query_ids = tf.tile(copy_query_ids, [doc_ids_list.shape[0], 1])
+
+            doc_ids_list = tf.cast(sample["doc_ids"], tf.int32)
+            doc_ids_list = tf.reshape(doc_ids_list, [num_candidate, len_docs])
+
+            # assert (doc_ids_list.shape.as_list == [num_candidate, len_docs])
+
+            # copy_query_ids = tf.reshape(query_ids, [1, query_ids.shape[0]])
+            copy_query_ids = tf.reshape(query_ids, [1, -1])
+            # assert (query_ids.shape.as_list == [1, len_docs])
+
+            copy_query_ids = tf.tile(copy_query_ids, [num_candidate, 1])
 
             query_doc_ids_list = tf.concat([copy_query_ids, doc_ids_list], 1)
-
 
             qrel_ids = tf.cast(sample["qrel_ids"], tf.int32)
             # if "len_gt_titles" in sample:
@@ -382,7 +360,7 @@ def input_fn_builder(dataset_path, seq_length, num_candidate, is_training,
             }
             return features
 
-        dataset = tf.data.TFRecordDataset([dataset_path])
+        dataset = tf.data.TFRecordDataset(dataset_path)
 
         # todo pre-process dataset
         dataset = dataset.map(
@@ -461,6 +439,13 @@ def main(_):
             num_shards=FLAGS.num_tpu_cores,
             per_host_input_for_training=is_per_host))
 
+    session_config = tf.ConfigProto(log_device_placement=True)
+    session_config.gpu_options.per_process_gpu_memory_fraction = 0.5
+    run_config = tf.estimator.RunConfig().replace(
+        model_dir=FLAGS.output_dir,
+        save_checkpoints_steps=FLAGS.save_checkpoints_steps,
+        session_config=session_config)
+
     model_fn = model_fn_builder(
         bert_config=bert_config,
         num_labels=2,
@@ -473,22 +458,33 @@ def main(_):
 
     # If TPU is not available, this will fall back to normal Estimator on CPU
     # or GPU.
-    estimator = tf.contrib.tpu.TPUEstimator(
-        use_tpu=FLAGS.use_tpu,
+
+    # estimator = tf.contrib.tpu.TPUEstimator(
+    #     use_tpu=FLAGS.use_tpu,
+    #     model_fn=model_fn,
+    #     config=run_config,
+    #     train_batch_size=FLAGS.train_batch_size,
+    #     eval_batch_size=FLAGS.eval_batch_size,
+    #     predict_batch_size=FLAGS.eval_batch_size)
+
+    estimator = tf.estimator.Estimator(
         model_fn=model_fn,
         config=run_config,
-        train_batch_size=FLAGS.train_batch_size,
-        eval_batch_size=FLAGS.eval_batch_size,
-        predict_batch_size=FLAGS.eval_batch_size)
+        params={
+            'batch_size': FLAGS.train_batch_size
+        }
+    )
 
     if FLAGS.do_train:
         tf.logging.info("***** Running training *****")
         tf.logging.info("  Batch size = %d", FLAGS.train_batch_size)
         tf.logging.info("  Num steps = %d", FLAGS.num_train_steps)
         train_input_fn = input_fn_builder(
-            dataset_path=os.path.join(FLAGS.data_dir, "dataset_train.tf"),
+            dataset_path=os.path.join(FLAGS.data_dir, "dataset8_test.tf"),
             seq_length=FLAGS.max_seq_length,
+            num_candidate=8,
             is_training=True)
+
         estimator.train(input_fn=train_input_fn,
                         max_steps=FLAGS.num_train_steps)
         tf.logging.info("Done Training!")
