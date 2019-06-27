@@ -126,7 +126,7 @@ def hinge_loss(similarity_good_tensor, similarity_bad_tensor, margin):
   return tf.maximum(
       0.0,
       tf.add(
-          tf.sub(
+          tf.subtract(
               margin,
               similarity_good_tensor
           ),
@@ -136,39 +136,50 @@ def hinge_loss(similarity_good_tensor, similarity_bad_tensor, margin):
 
 def cosine_similarity(a, b):
   return tf.div(
-      tf.reduce_sum(tf.mul(a, b), 1),
-      tf.mul(
+      tf.reduce_sum(tf.multiply(a, b), 1),
+      tf.multiply(
           tf.sqrt(tf.reduce_sum(tf.square(a), 1)),
           tf.sqrt(tf.reduce_sum(tf.square(b), 1))
       )
   )
 
-def getBERTOutput(self,bert_config,is_training,input_ids,
+def get_bert_output(bert_config,is_training,input_ids,
               input_mask,segment_ids,use_one_hot_embeddings):
-        # with tf.variable_scope(name_or_scope='encoder', reuse=tf.AUTO_REUSE):
-      model = modeling.BertModel(
+  with tf.variable_scope(name_or_scope='encoder', reuse=tf.AUTO_REUSE):
+    model = modeling.BertModel(
           config=bert_config,
           is_training=is_training,
           input_ids=input_ids,
           input_mask=input_mask,
           token_type_ids=segment_ids,
           use_one_hot_embeddings=use_one_hot_embeddings)
-      return model.get_pooled_output()
+    return model.get_pooled_output()
 
-def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
-                 labels, num_labels, use_one_hot_embeddings):
+def create_model(bert_config, is_training,
+        query_ids, doc_ids_good, doc_ids_bad,
+        query_mask, doc_good_mask, doc_bad_mask,
+        query_segment_id, doc_good_segment_id, doc_bad_segment_id,
+        num_labels, use_one_hot_embeddings):
   """Creates a classification model."""
-  # model = modeling.BertModel(
-  #     config=bert_config,
-  #     is_training=is_training,
-  #     input_ids=input_ids,
-  #     input_mask=input_mask,
-  #     token_type_ids=segment_ids,
-  #     use_one_hot_embeddings=use_one_hot_embeddings)
 
   # output_layer = model.get_pooled_output()
-  output_layer = getBERTOutput(bert_config,is_training,input_ids,
-              input_mask,segment_ids,use_one_hot_embeddings)
+  output_ques = get_bert_output(bert_config, is_training, query_ids,
+                              query_mask, query_segment_id, use_one_hot_embeddings)
+  output_good = get_bert_output(bert_config, is_training, doc_ids_good,
+                              doc_good_mask, doc_good_segment_id, use_one_hot_embeddings)
+  output_bad = get_bert_output(bert_config, is_training, doc_ids_bad,
+                             doc_bad_mask, doc_bad_segment_id, use_one_hot_embeddings)
+
+  similarity_good = cosine_similarity(output_ques, output_good)
+  similarity_bad = cosine_similarity(output_ques, output_bad)
+
+  loss = hinge_loss(
+      similarity_good,
+      similarity_bad,
+      margin=1
+  )
+
+  output_layer = tf.concat([output_ques, output_good, output_bad], 0)
   hidden_size = output_layer.shape[-1].value
 
   output_weights = tf.get_variable(
@@ -187,10 +198,11 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
     logits = tf.nn.bias_add(logits, output_bias)
     log_probs = tf.nn.log_softmax(logits, axis=-1)
 
-    one_hot_labels = tf.one_hot(labels, depth=num_labels, dtype=tf.float32)
-
-    per_example_loss = -tf.reduce_sum(one_hot_labels * log_probs, axis=-1)
-    loss = tf.reduce_mean(per_example_loss)
+    # one_hot_labels = tf.one_hot(labels, depth=num_labels, dtype=tf.float32)
+    #
+    # per_example_loss = -tf.reduce_sum(one_hot_labels * log_probs, axis=-1)
+    # loss = tf.reduce_mean(per_example_loss)
+    per_example_loss = loss
 
     return (loss, per_example_loss, log_probs)
 
@@ -207,15 +219,27 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
     for name in sorted(features.keys()):
       tf.logging.info("  name = %s, shape = %s" % (name, features[name].shape))
 
-    input_ids = features["input_ids"]
-    input_mask = features["input_mask"]
-    segment_ids = features["segment_ids"]
-    label_ids = features["label_ids"]
+    query_ids = features["query_ids"]
+    doc_ids_good = features["doc_ids_good"]
+    doc_ids_bad = features["doc_ids_bad"]
+
+    query_segment_id = features["query_segment_id"]
+    doc_good_segment_id = features["doc_good_segment_id"]
+    doc_bad_segment_id = features["doc_bad_segment_id"]
+
+    query_mask = features["query_mask"]
+    doc_good_mask = features["doc_good_mask"]
+    doc_bad_mask = features["doc_bad_mask"]
+
+    # label_ids = features["label_ids"]
     len_gt_titles = features["len_gt_titles"]
 
     is_training = (mode == tf.estimator.ModeKeys.TRAIN)
     (total_loss, per_example_loss, log_probs) = create_model(
-        bert_config, is_training, input_ids, input_mask, segment_ids, label_ids,
+        bert_config, is_training,
+        query_ids, doc_ids_good, doc_ids_bad,
+        query_mask, doc_good_mask, doc_bad_mask,
+        query_segment_id, doc_good_segment_id, doc_bad_segment_id,
         num_labels, use_one_hot_embeddings)
 
     tvars = tf.trainable_variables()
@@ -287,33 +311,49 @@ def input_fn_builder(dataset_path, seq_length, is_training,
       features = {
           "query_ids": tf.FixedLenSequenceFeature(
               [], tf.int64, allow_missing=True),
-          "doc_ids": tf.FixedLenSequenceFeature(
+          "doc_ids_good": tf.FixedLenSequenceFeature(
               [], tf.int64, allow_missing=True),
-          "label": tf.FixedLenFeature([], tf.int64),
+          "doc_ids_bad": tf.FixedLenSequenceFeature(
+              [], tf.int64, allow_missing=True),
+          # "label": tf.FixedLenFeature([], tf.int64),
           "len_gt_titles": tf.FixedLenFeature([], tf.int64),
       }
       sample = tf.parse_single_example(data_record, features)
 
       query_ids = tf.cast(sample["query_ids"], tf.int32)
-      doc_ids = tf.cast(sample["doc_ids"], tf.int32)
-      label_ids = tf.cast(sample["label"], tf.int32)
+      doc_ids_good = tf.cast(sample["doc_ids_good"], tf.int32)
+      doc_ids_bad = tf.cast(sample["doc_ids_bad"], tf.int32)
+      # label_ids = tf.cast(sample["label"], tf.int32)
+
       #if "len_gt_titles" in sample:
       len_gt_titles = tf.cast(sample["len_gt_titles"], tf.int32)
       #else:
       #  len_gt_titles = tf.constant(-1, shape=[1], dtype=tf.int32)
-      input_ids = tf.concat((query_ids, doc_ids), 0)
+      # input_ids = tf.concat((query_ids, doc_ids), 0)
 
       query_segment_id = tf.zeros_like(query_ids)
-      doc_segment_id = tf.ones_like(doc_ids)
-      segment_ids = tf.concat((query_segment_id, doc_segment_id), 0)
+      doc_good_segment_id = tf.zeros_like(doc_ids_good)
+      doc_bad_segment_id = tf.zeros_like(doc_ids_bad)
+      # segment_ids = tf.concat((query_segment_id, doc_segment_id), 0)
 
-      input_mask = tf.ones_like(input_ids)
+      query_mask = tf.ones_like(query_ids)
+      doc_good_mask = tf.ones_like(doc_ids_good)
+      doc_bad_mask = tf.ones_like(doc_ids_bad)
 
       features = {
-          "input_ids": input_ids,
-          "segment_ids": segment_ids,
-          "input_mask": input_mask,
-          "label_ids": label_ids,
+          "query_ids": query_ids,
+          "doc_good_ids": doc_ids_good,
+          "doc_bad_ids": doc_ids_bad,
+
+          "query_segment_id": query_segment_id,
+          "doc_good_segment_id": doc_good_segment_id,
+          "doc_bad_segment_id": doc_bad_segment_id,
+
+          "query_mask": query_mask,
+          "doc_good_mask": doc_good_mask,
+          "doc_bad_mask": doc_bad_mask,
+
+          # "label_ids": label_ids,
           "len_gt_titles": len_gt_titles,
       }
       return features
@@ -332,17 +372,35 @@ def input_fn_builder(dataset_path, seq_length, is_training,
     dataset = dataset.padded_batch(
         batch_size=batch_size,
         padded_shapes={
-            "input_ids": [seq_length],
-            "segment_ids": [seq_length],
-            "input_mask": [seq_length],
-            "label_ids": [],
+            "query_ids": [seq_length],
+            "doc_ids_good": [seq_length],
+            "doc_ids_bad": [seq_length],
+
+            "query_segment_id": [seq_length],
+            "doc_good_segment_id": [seq_length],
+            "doc_bad_segment_id": [seq_length],
+
+            "query_mask": [seq_length],
+            "doc_good_mask": [seq_length],
+            "doc_bad_mask": [seq_length],
+
+            # "label_ids": [],
             "len_gt_titles": [],
         },
         padding_values={
-            "input_ids": 0,
-            "segment_ids": 0,
-            "input_mask": 0,
-            "label_ids": 0,
+            "query_ids": 0,
+            "doc_ids_good": 0,
+            "doc_ids_bad": 0,
+
+            "query_segment_id": 0,
+            "doc_good_segment_id": 0,
+            "doc_bad_segment_id": 0,
+
+            "query_mask": 0,
+            "doc_good_mask": 0,
+            "doc_bad_mask": 0,
+
+            # "label_ids": 0,
             "len_gt_titles": 0,
         },
         drop_remainder=True)

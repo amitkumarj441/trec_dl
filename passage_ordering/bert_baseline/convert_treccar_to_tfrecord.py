@@ -116,39 +116,56 @@ def convert_dataset(data, corpus, set_name, tokenizer):
       elif set_name == 'test':
         max_docs = FLAGS.num_test_docs
 
-      doc_titles = doc_titles[:max_docs]
+      doc_good_titles = [doc_title for doc_title in qrels]
+      doc_bad_titles = [doc_title for doc_title in doc_titles if doc_title not in qrels]
+
+      doc_good_titles = doc_good_titles[:max_docs]
+      doc_bad_titles = doc_bad_titles[:max_docs]
 
       # Add fake docs so we always have max_docs per query.
-      doc_titles += max(0, max_docs - len(doc_titles)) * [random_title]
+      doc_good_titles += max(0, max_docs - len(doc_good_titles)) * [random_title]
+      doc_bad_titles += max(0, max_docs - len(doc_bad_titles)) * [random_title]
 
-      labels = [
-          1 if doc_title in qrels else 0 
-          for doc_title in doc_titles
-      ]
+      # labels = [
+      #     1 if doc_title in qrels else 0
+      #     for doc_title in doc_titles
+      # ]
 
-      doc_token_ids = [
+      doc_token_good_ids = [
           tokenization.convert_to_bert_input(
-              text=tokenization.convert_to_unicode(corpus[doc_title]),
-              max_seq_length=FLAGS.max_seq_length - len(query_ids),
+              text=tokenization.convert_to_unicode(corpus[doc_title_good]),
+              max_seq_length=FLAGS.max_seq_length,
               tokenizer=tokenizer,
               add_cls=False)
-          for doc_title in doc_titles
+          for doc_title_good in doc_good_titles
       ]
 
-      for rank, (doc_token_id, label) in enumerate(zip(doc_token_ids, labels)):
-        doc_ids_tf = tf.train.Feature(
-            int64_list=tf.train.Int64List(value=doc_token_id))
+      doc_token_bad_ids = [
+          tokenization.convert_to_bert_input(
+              text=tokenization.convert_to_unicode(corpus[doc_title_bad]),
+              max_seq_length=FLAGS.max_seq_length,
+              tokenizer=tokenizer,
+              add_cls=False)
+          for doc_title_bad in doc_bad_titles
+      ]
 
-        labels_tf = tf.train.Feature(
-            int64_list=tf.train.Int64List(value=[label]))
+      for rank, (doc_token_id_good, doc_token_id_bad) in enumerate(zip(doc_token_good_ids, doc_token_bad_ids)):
+        doc_ids_good_tf = tf.train.Feature(
+            int64_list=tf.train.Int64List(value=doc_token_id_good))
+
+        doc_ids_bad_tf = tf.train.Feature(
+            int64_list=tf.train.Int64List(value=doc_token_id_bad))
+
+        # labels_tf = tf.train.Feature(
+        #     int64_list=tf.train.Int64List(value=[label]))
 
         len_gt_titles_tf = tf.train.Feature(
             int64_list=tf.train.Int64List(value=[len(qrels)]))
 
         features = tf.train.Features(feature={
             'query_ids': query_ids_tf,
-            'doc_ids': doc_ids_tf,
-            'label': labels_tf,
+            'doc_ids_good': doc_ids_good_tf,
+            'doc_ids_bad': doc_ids_bad_tf,
             'len_gt_titles': len_gt_titles_tf,
         })
         example = tf.train.Example(features=features)
