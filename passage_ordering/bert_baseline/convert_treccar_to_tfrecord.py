@@ -10,7 +10,6 @@ The outputs are 3 TFRecord files, for training, dev and test.
 import collections
 import json
 import os
-import re
 import tensorflow as tf
 import time
 # local modules
@@ -142,7 +141,8 @@ def convert_dataset(data, corpus, set_name, tokenizer):
             # Add fake docs so we always have max_docs per query.
             doc_titles += max(0, max_docs - len(doc_titles)) * [random_title]
 
-            docs_length = FLAGS.max_seq_length - len(query_ids)
+            # docs_length = FLAGS.max_seq_length - len(query_ids)
+            docs_length = FLAGS.max_seq_length
             query_ids_set = set(query_ids)
 
             # generate all candidate docs ids into "one" list
@@ -154,13 +154,15 @@ def convert_dataset(data, corpus, set_name, tokenizer):
                     continue
                 else:
                     padded_title = candidate_title
-                candidate_token_ids.extend(
-                    tokenization.convert_to_bert_input(
-                        text=tokenization.convert_to_unicode(corpus[candidate_title]),
-                        max_seq_length=docs_length,
-                        tokenizer=tokenizer,
-                        add_cls=False)
-                )
+
+                cids = tokenization.convert_to_bert_input(
+                    text=tokenization.convert_to_unicode(corpus[candidate_title]),
+                    max_seq_length=docs_length,
+                    tokenizer=tokenizer,
+                    add_cls=False)
+
+                cids += [0] * (docs_length - len(cids))
+                candidate_token_ids.extend(cids)
                 num_candidate_docs += 1
 
                 if num_candidate_docs == FLAGS.num_candidate_docs:
@@ -194,18 +196,16 @@ def convert_dataset(data, corpus, set_name, tokenizer):
                 qrel_token_tf = tf.train.Feature(
                     int64_list=tf.train.Int64List(value=qrel_token_id))
 
-                paragraph_length = tf.train.Feature(
-                    int64_list=tf.train.Int64List(value=[docs_length]))
-
-                len_gt_titles_tf = tf.train.Feature(
-                    int64_list=tf.train.Int64List(value=[len(qrels)]))
+                # paragraph_length = tf.train.Feature(
+                #     int64_list=tf.train.Int64List(value=[docs_length]))
+                #
+                # len_gt_titles_tf = tf.train.Feature(
+                #     int64_list=tf.train.Int64List(value=[len(qrels)]))
 
                 features = tf.train.Features(feature={
                     'query_ids': query_ids_tf,
                     'doc_ids': doc_ids_tf,
                     'qrel_ids': qrel_token_tf,
-                    'len_docs': paragraph_length,
-                    'len_gt_titles': len_gt_titles_tf,
                 })
                 example = tf.train.Example(features=features)
                 writer.write(example.SerializeToString())
