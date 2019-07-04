@@ -11,7 +11,7 @@ import numpy as np
 import tensorflow as tf
 
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '4,5,6'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,3,4,5,6'
 import sys
 
 sys.path.append('../..')
@@ -70,7 +70,7 @@ flags.DEFINE_bool("do_train", True, "Whether to run training.")
 
 flags.DEFINE_bool("do_eval", False, "Whether to run eval on the dev set.")
 
-flags.DEFINE_integer("train_batch_size", 8, "Total batch size for training.")
+flags.DEFINE_integer("train_batch_size", 16, "Total batch size for training.")
 
 flags.DEFINE_integer("eval_batch_size", 2, "Total batch size for eval.")
 
@@ -179,30 +179,45 @@ def gesd_similarity(a, b):
     return 1.0 / (1.0 + euclidean) * 1.0 / (1.0 + sigmoid_dot)
 
 
-def get_most_similar_answer(query, bas):
-    # ga = tf.cast(ga, tf.float32)
-    # bas = tf.cast(bas, tf.float32)
-    print("the size of ga {},the size of bas {}".format(query, bas))
-    queries = tf.expand_dims(query, 0)
-    queries = tf.tile(queries, [FLAGS.num_docs, 1])
-    most_similar_index = tf.argmax(gesd_similarity(queries, bas))
-    return bas[most_similar_index, :]
+# def get_most_similar_answer(query, bas):
+#     queries = tf.expand_dims(query, 0)
+#     queries = tf.tile(queries, [FLAGS.num_docs, 1])
+#     most_similar_index = tf.argmax(gesd_similarity(queries, bas))
+#     return bas[most_similar_index, :]
+
+def get_most_similar_answer(query, bas, bert_batch_num):
+    # [-1, max_seq_length]
+    queries = tf.tile(query, [1, FLAGS.num_docs])
+    queries = tf.reshape(queries, [FLAGS.num_docs * bert_batch_num, -1])
+
+    # [FLAGS.num_docs * bert_batch_num, 1]
+    bad_similarity = gesd_similarity(queries, bas)
+    # [bert_batch_num, FLAGS.num_docs]
+    bad_similarity = tf.reshape(bad_similarity, [bert_batch_num, FLAGS.num_docs])
+    # [bert_batch_num, ]
+    ind_max = tf.argmax(bad_similarity, axis=1)
+    flat_ind_max = ind_max + tf.cast(tf.range(bert_batch_num) * FLAGS.num_docs, tf.int64)
+    worst_similar_answer = tf.gather(bas, flat_ind_max)
+    return worst_similar_answer
 
 
-def get_bert_output(bert_config, is_training, features, input_ids, use_one_hot_embeddings):
-    segment_ids = features["segment_ids"]
-    input_mask = features["input_mask"]
-    with tf.variable_scope("bert_out", reuse=tf.AUTO_REUSE):
+def get_bert_output(bert_config, is_training, features, use_one_hot_embeddings):
+    def output(input_ids):
+        segment_ids = features["segment_ids"]
+        input_mask = features["input_mask"]
+        # with tf.variable_scope("bert_out", reuse=reuse):
         model = modeling.BertModel(
             config=bert_config,
             is_training=is_training,
             input_ids=input_ids,
-            input_mask=input_mask,
-            token_type_ids=segment_ids,
+            # input_mask=input_mask,
+            # token_type_ids=segment_ids,
             use_one_hot_embeddings=use_one_hot_embeddings)
         r = model.get_pooled_output()
         # return tf.reshape(r, [r.shape[0], -1])
         return r
+    return output
+
 
 
 def create_model(bert_config, is_training, features, use_one_hot_embeddings):
@@ -210,42 +225,78 @@ def create_model(bert_config, is_training, features, use_one_hot_embeddings):
     qrel_ids = features["qrel_ids"]
     query_ids = features["query_ids"]
 
-    # [batch_size, hidden_size]
-    query_bert_outputs = get_bert_output(bert_config, is_training,
-                                                features, query_ids, use_one_hot_embeddings)
-    # [batch_size, hidden_size]
-    good_answers_bert_outputs = get_bert_output(bert_config, is_training,
-                                                features, qrel_ids, use_one_hot_embeddings)
-
-    most_similar_answers = []
     batch_size = FLAGS.train_batch_size
-    for i in range(doc_ids_list.shape[0]):
-        div_query_doc_ids_list = doc_ids_list[i]
-        bad_answers_bert_outputs = None
-        # 每次处理batch size大小的bad answers
-        for j in range(0, FLAGS.num_docs, batch_size):
-            bad_answers_bert_outputs_batch = \
-                get_bert_output(bert_config, is_training, features, div_query_doc_ids_list[j: j+batch_size], use_one_hot_embeddings)
+    num_docs = FLAGS.num_docs
 
-            if bad_answers_bert_outputs is not None:
-                bad_answers_bert_outputs = tf.concat([bad_answers_bert_outputs, bad_answers_bert_outputs_batch], axis=0)
-            else:
-                bad_answers_bert_outputs = bad_answers_bert_outputs_batch
-
-        # [hidden_size, ]
-        most_similar_answer = get_most_similar_answer(query_bert_outputs[i], bad_answers_bert_outputs)
-        # len = batch_size
-        most_similar_answers.append(tf.expand_dims(most_similar_answer, 0))
-
+    get_output = get_bert_output(bert_config, is_training, features, use_one_hot_embeddings)
     # [batch_size, hidden_size]
-    most_similar_answers = tf.concat(most_similar_answers, axis=0)
+    query_bert_outputs = get_output(query_ids)
+    # [batch_size, hidden_size]
+    good_answers_bert_outputs = get_output(qrel_ids)
+
+    doc_ids_list = tf.reshape(doc_ids_list, [num_docs * batch_size, -1])
+    random_idxs = tf.random.uniform([batch_size, ], minval=0, maxval=num_docs, dtype=tf.int64)
+
+    flat_idx = random_idxs + tf.cast(tf.range(batch_size) * num_docs, tf.int64)
+    worst_similar_answers = tf.gather(doc_ids_list, flat_idx)
+    worst_similar_answers = get_output(worst_similar_answers)
 
     with tf.variable_scope("loss"):
         query_good_similarity = cosine_similarity(query_bert_outputs, good_answers_bert_outputs)
-        query_bad_similarity = cosine_similarity(query_bert_outputs, most_similar_answers)
+        query_bad_similarity = cosine_similarity(query_bert_outputs, worst_similar_answers)
         per_example_loss = hinge_loss(query_good_similarity, query_bad_similarity, 0.8)
         loss = tf.reduce_mean(per_example_loss)
         return (loss, per_example_loss)
+
+
+def create_model1(bert_config, is_training, features, use_one_hot_embeddings):
+    doc_ids_list = features["doc_ids_list"]
+    qrel_ids = features["qrel_ids"]
+    query_ids = features["query_ids"]
+
+    # [batch_size, hidden_size]
+    query_bert_outputs = get_bert_output(bert_config, is_training,
+                                                features, query_ids, use_one_hot_embeddings,reuse=False)
+    # [batch_size, hidden_size]
+    good_answers_bert_outputs = get_bert_output(bert_config, is_training,
+                                                features, qrel_ids, use_one_hot_embeddings,reuse=True)
+
+    worst_similar_answers_list = []
+
+    # div_num = 32
+    div_num = 1
+    batch_size = doc_ids_list.shape[0]
+    bert_batch_num = batch_size // div_num
+    # print("batch_size:{}, bert_batch_num:{}, div_num:{}".format(batch_size, bert_batch_num, div_num))
+
+    for i in range(0, div_num):
+        start_idx = bert_batch_num * i
+        end_idx = bert_batch_num * (i + 1)
+        partial_doc_ids_list = doc_ids_list[start_idx: end_idx, :, :]
+        # print("{}, {},partial_doc_ids_list: {}".format(start_idx, end_idx,partial_doc_ids_list))
+        partial_doc_ids_list = tf.reshape(partial_doc_ids_list, [bert_batch_num * FLAGS.num_docs, -1])
+
+        partial_bad_answers_bert_outputs = \
+            get_bert_output(bert_config, is_training, features, partial_doc_ids_list, use_one_hot_embeddings,reuse=True)
+
+        partial_query_bert_outputs = query_bert_outputs[start_idx: end_idx, :]
+
+        partial_worst_similar_answers = \
+            get_most_similar_answer(partial_query_bert_outputs, partial_bad_answers_bert_outputs, bert_batch_num)
+        # del partial_bad_answers_bert_outputs
+        # len = batch_size
+        worst_similar_answers_list.append(partial_worst_similar_answers)
+
+    # [batch_size, hidden_size]
+    worst_similar_answers = tf.concat(worst_similar_answers_list, axis=0)
+
+    with tf.variable_scope("loss"):
+        query_good_similarity = cosine_similarity(query_bert_outputs, good_answers_bert_outputs)
+        query_bad_similarity = cosine_similarity(query_bert_outputs, worst_similar_answers)
+        per_example_loss = hinge_loss(query_good_similarity, query_bad_similarity, 0.8)
+        loss = tf.reduce_mean(per_example_loss)
+        return (loss, per_example_loss)
+
 
 
 def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
@@ -266,6 +317,11 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
         (total_loss, per_example_loss) = create_model(
             bert_config, is_training, features, use_one_hot_embeddings)
 
+        # for n in tf.get_default_graph().get_operations():
+        #     print(n.name)
+        #
+        # print(tvars)
+        # exit(0)
         tvars = tf.trainable_variables()
 
         scaffold_fn = None
@@ -296,9 +352,11 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
 
             # train_op = optimization.create_optimizer(
             #     total_loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu)
-
+            # with tf.device('/device:GPU:5'):
             optimizer = tf.train.GradientDescentOptimizer(learning_rate)
-            train_op = optimizer.minimize(total_loss, global_step=tf.train.get_global_step())
+            train_op = optimizer.minimize(total_loss, global_step=tf.train.get_global_step(),
+                                          colocate_gradients_with_ops=True)
+
             logging_hook = tf.train.LoggingTensorHook({"loss": total_loss}, every_n_iter=3)
 
             output_spec = tf.contrib.tpu.TPUEstimatorSpec(
@@ -390,7 +448,7 @@ def input_fn_builder(dataset_path, max_seq_length, num_candidate, is_training,
             batch_size=batch_size,
             padded_shapes={
                 "doc_ids_list": [num_candidate, max_seq_length],
-                "query_ids": [max_seq_length],
+                "query_ids": [50],
                 "qrel_ids": [max_seq_length],
                 "segment_ids": [max_seq_length],
                 "input_mask": [max_seq_length],
@@ -428,16 +486,26 @@ def main(_):
         tpu_cluster_resolver = tf.contrib.cluster_resolver.TPUClusterResolver(
             TPU_ADDRESS)
 
+    config = tf.ConfigProto(allow_soft_placement=False)
+    # config = tf.ConfigProto(log_device_placement=True)
+
+    # config = tf.ConfigProto(allow_soft_placement=False)
+    config.gpu_options.allow_growth = True
+
+
     is_per_host = tf.contrib.tpu.InputPipelineConfig.PER_HOST_V2
     run_config = tf.contrib.tpu.RunConfig(
+        session_config=config,
         cluster=tpu_cluster_resolver,
         model_dir=FLAGS.output_dir,
         save_checkpoints_steps=FLAGS.save_checkpoints_steps,
-        keep_checkpoint_max=10,
-        tpu_config=tf.contrib.tpu.TPUConfig(
-            iterations_per_loop=FLAGS.iterations_per_loop,
-            num_shards=FLAGS.num_tpu_cores,
-            per_host_input_for_training=is_per_host))
+        keep_checkpoint_max=5,
+        # tpu_config=tf.contrib.tpu.TPUConfig(
+        #     iterations_per_loop=FLAGS.iterations_per_loop,
+        #     num_shards=FLAGS.num_tpu_cores,
+        #     per_host_input_for_training=is_per_host)
+    )
+
 
     # session_config = tf.ConfigProto(log_device_placement=True)
     # session_config.gpu_options.per_process_gpu_memory_fraction = 0.5
